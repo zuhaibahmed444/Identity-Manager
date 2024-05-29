@@ -1,15 +1,26 @@
-import express, { Request, Response } from 'express';
+import 'reflect-metadata';
+import express from 'express';
 import dotenv from 'dotenv';
+import { InversifyExpressServer } from 'inversify-express-utils';
+import { configureContainer } from './config/inversify.config';
+import './controller/contactController';
 
-dotenv.config();
+const startServer = async () => {
+  const container = await configureContainer();
 
-const app = express();
-const port = process.env.PORT || 3000;
+  const server = new InversifyExpressServer(container);
+  server.setConfig((app) => {
+    app.use(express.json());
+  });
 
-app.get('/', (req: Request, res: Response) => {
-  res.send("Server is Live");
-});
+  dotenv.config();
 
-app.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
-});
+  const port = process.env.PORT || 3000;
+
+  const app = server.build();
+  app.listen(port, () => {
+    console.log(`Server is live on port ${port}`);
+  });
+};
+
+startServer();
