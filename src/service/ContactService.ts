@@ -14,82 +14,115 @@ export class ContactService {
   public async createOrUpdateIdentity(email?: string, phoneNumber?: string) {
     let primaryContact: Contact | null = null;
     let secondaryContacts: Contact[] = [];
-    let contacts : Contact[] = []
 
-    if (phoneNumber || email){
-      contacts = await this.entityManager.find(Contact, {  $or: [
-        { email},
-        { phoneNumber }
-      ]});
-    }
+    const contacts = await this.findContacts(email, phoneNumber);
 
     if (contacts.length === 0) {
-      //  to add the primary contact
-      primaryContact = this.entityManager.create(Contact, {
-        phoneNumber,
-        email,
-        linkPrecedence: 'primary',
-      } as Contact);
-      await this.entityManager.persistAndFlush(primaryContact);
-    } else if (contacts.length >1){
-      // if already primary and secondary exist
-      contacts.forEach((contact) =>{
-        if(contact.linkedId){
-          secondaryContacts.push(contact);
-        }else{
-          primaryContact = contact
-        }
-      })
-      if(this.allPrimaryContacts(contacts)){
-        // if only primary exist and convert to primary 
-        contacts.sort((a,b) => a.id - b.id);
-        primaryContact = contacts[0];
-        const contactToUpdate = this.entityManager.create(Contact, { id : contacts[1].id, linkedId : contacts[0].linkedId, email : contacts[1].email ,phoneNumber : contacts[1].phoneNumber, createdAt : contacts[1].createdAt, updatedAt : new Date() , deletedAt: contacts[1].deletedAt,linkPrecedence :'secondary'})
-        await this.entityManager.upsert(contactToUpdate);
-        secondaryContacts.push(contactToUpdate);
-        return this.createResponse.create(primaryContact!, secondaryContacts)
-      }
-    }else if (contacts.length > 0 && contacts[0].linkedId){
-      // if secondary contacts email is passed 
-      primaryContact = await this.entityManager.findOne(Contact, { id : contacts[0].linkedId})
-      secondaryContacts = contacts;
-    }else if (contacts.length > 0 && !contacts[0].linkedId){
-      // if primary contacts email is passed
-      primaryContact = contacts[0];
-
-      // find secondary based on primary
-      const secondaryContactsFromprimary = await this.entityManager.find(Contact, {  $or: [
-        { email : primaryContact.email},
-        { phoneNumber: primaryContact.phoneNumber }
-      ], linkPrecedence:'secondary'});
-
-
-      if(secondaryContactsFromprimary.length === 0){
-        // create secondary if does not exist
-        const secondaryContact = this.entityManager.create(Contact, {
-          phoneNumber,
-          email,
-          linkPrecedence: 'secondary',
-          linkedId: primaryContact.id
-        } as Contact);
-        secondaryContacts.push(secondaryContact);
-        await this.entityManager.persistAndFlush(secondaryContact);
-      }else{
-        // if secondary already exists
-        secondaryContacts = secondaryContactsFromprimary
-      }
+      primaryContact = await this.createPrimaryContact(email, phoneNumber);
+    } else if (contacts.length > 1) {
+      primaryContact = await this.handleMultipleContacts(contacts, secondaryContacts);
+    } else if (contacts.length === 1) {
+      primaryContact = await this.handleSingleContact(contacts[0],secondaryContacts,email, phoneNumber);
     }
 
     return this.createResponse.create(primaryContact!, secondaryContacts);
   }
 
-
-  private allPrimaryContacts(contacts : Contact[]): boolean{
-    console.log("Inthe primary contacts validatios")
-    contacts.forEach((contact) =>{
-      if(contact.linkPrecedence !== 'primary') return false;
-    })
-    return true
+  private async findContacts(email?: string, phoneNumber?: string): Promise<Contact[]> {
+    if (!phoneNumber && !email) return [];
+    return this.entityManager.find(Contact, { $or: [{ email }, { phoneNumber }] });
   }
-  
+
+  private async createPrimaryContact(email?: string, phoneNumber?: string): Promise<Contact> {
+    const primaryContact = this.entityManager.create(Contact, {
+      phoneNumber,
+      email,
+      linkPrecedence: 'primary',
+    } as Contact)
+    await this.entityManager.persistAndFlush(primaryContact);
+    return primaryContact;
+  }
+
+  private async handleMultipleContacts(contacts: Contact[], secondaryContacts: Contact[]): Promise<Contact> {
+    if (this.allPrimaryContacts(contacts)) {
+      contacts.sort((a, b) => a.id - b.id);
+      const primaryContact = contacts[0];
+      await this.convertToSecondaryContact(contacts[1], primaryContact);
+      secondaryContacts.push({ ...contacts[1], linkedId: primaryContact.id, linkPrecedence: 'secondary' });
+      return primaryContact;
+    }
+    return this.segregatePrimaryAndSecondaryContacts(contacts, secondaryContacts);
+  }
+
+  private async convertToSecondaryContact(contact: Contact, primaryContact: Contact) {
+    const updatedContact = this.entityManager.create(Contact, {
+      linkedId: primaryContact.id,
+      email: contact.email,
+      phoneNumber: contact.phoneNumber,
+      createdAt: contact.createdAt,
+      updatedAt: new Date(),
+      deletedAt: contact.deletedAt,
+      linkPrecedence: 'secondary',
+    });
+    await this.entityManager.nativeUpdate(Contact, { id: contact.id }, updatedContact);
+  }
+
+  private segregatePrimaryAndSecondaryContacts(contacts: Contact[], secondaryContacts: Contact[]): Contact {
+    let primaryContact: Contact | null = null;
+    contacts.forEach(contact => {
+      if (contact.linkedId) {
+        secondaryContacts.push(contact);
+      } else {
+        primaryContact = contact;
+      }
+    });
+    return primaryContact!;
+  }
+
+  private async handleSingleContact(contact: Contact, secondaryContacts: Contact[], email?: string, phoneNumber?: string): Promise<Contact> {
+    let primaryContact: Contact;
+
+    if (contact.linkedId) {
+      // If the contact is secondary, find its primary contact
+      primaryContact = await this.entityManager.findOne(Contact, { id: contact.linkedId }) as Contact ;
+      secondaryContacts.push(contact);
+    } else {
+      // If the contact is primary
+      primaryContact = contact;
+      const secondaryContactsFromPrimary = await this.findSecondaryContacts(primaryContact);
+
+      if (secondaryContactsFromPrimary.length === 0) {
+        // Create a new secondary contact if none exist
+        const newSecondaryContact = await this.createSecondaryContact(primaryContact, email, phoneNumber);
+        secondaryContacts.push(newSecondaryContact);
+      } else {
+        // Use existing secondary contacts
+        secondaryContacts.push(...secondaryContactsFromPrimary);
+      }
+    }
+
+    return primaryContact;
+  }
+
+  private async findSecondaryContacts(primaryContact: Contact): Promise<Contact[]> {
+    return this.entityManager.find(Contact, {
+      $or: [{ email: primaryContact.email }, { phoneNumber: primaryContact.phoneNumber }],
+      linkPrecedence: 'secondary',
+    });
+  }
+
+  private async createSecondaryContact(primaryContact: Contact, email?: string, phoneNumber?: string): Promise<Contact> {
+    const secondaryContact = this.entityManager.create(Contact, {
+      phoneNumber,
+      email,
+      linkPrecedence: 'secondary',
+      linkedId: primaryContact.id,
+    } as Contact);
+    await this.entityManager.persistAndFlush(secondaryContact);
+    return secondaryContact;
+  }
+
+  private allPrimaryContacts(contacts: Contact[]): boolean {
+    return contacts.every(contact => contact.linkPrecedence === 'primary');
+  }
 }
