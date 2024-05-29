@@ -12,6 +12,7 @@ const config: Options = {
   host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT || '3306'),
   debug: true,
+  discovery : { disableDynamicFileAccess: true}
 };
 
 export default config;
